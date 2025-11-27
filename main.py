@@ -1,270 +1,344 @@
 import os
 import json
 import time
+import argparse
 import numpy as np
 import pandas as pd
 from litellm import completion
 from dotenv import load_dotenv
+from data_loader import get_benchmark_prompts
 
 # --- 0. SETUP ---
-load_dotenv()  # Reads .env for GROQ_API_KEY / GEMINI_API_KEY
+load_dotenv()
 
 # --- 1. CONFIGURATION ---
-REWARD_PER_QUERY = 0.05
+REWARD_PER_QUERY = 0.15
+TIME_PENALTY_PER_SEC = 0.002
 QUALITY_THRESHOLD = 0.7
-FALLBACK_MODEL_ID = "groq/llama-3.3-70b-versatile"
+WEIGHTS_FILE = "market_weights.json"
 
-# Pricing & Specs (from Groq: https://groq.com/pricing)
+# JUDGE: Gemini 2.5 Flash (Strictly)
+JUDGE_MODEL_ID = "gemini/gemini-2.5-flash-lite"
+
+VALID_CATEGORIES = ["general", "medical", "law", "coding", "math", "finance"]
+
+# Specs
 MODEL_CATALOG = {
+    "groq/llama-3.1-8b-instant": {
+        "cost_in": 0.05 / 1e6, "cost_out": 0.08 / 1e6, "tps": 840, "base_latency": 0.2
+    },
     "groq/openai/gpt-oss-20b": {
-        "cost_in": 0.075 / 1e6, "cost_out": 0.30 / 1e6, "tps": 1000
-    },
-    "groq/openai/gpt-oss-120b": {
-        "cost_in": 0.15 / 1e6, "cost_out": 0.60 / 1e6, "tps": 500
-    },
-    "groq/moonshotai/kimi-k2-instruct-0905": {
-        "cost_in": 1.00 / 1e6, "cost_out": 3.00 / 1e6, "tps": 200
+        "cost_in": 0.075 / 1e6, "cost_out": 0.30 / 1e6, "tps": 1000, "base_latency": 0.2
     },
     "groq/meta-llama/llama-4-scout-17b-16e-instruct": {
-        "cost_in": 0.11 / 1e6, "cost_out": 0.34 / 1e6, "tps": 594
-    },
-    "groq/meta-llama/llama-4-maverick-17b-128e-instruct": {
-        "cost_in": 0.20 / 1e6, "cost_out": 0.60 / 1e6, "tps": 562
+        "cost_in": 0.11 / 1e6, "cost_out": 0.34 / 1e6, "tps": 594, "base_latency": 0.25
     },
     "groq/qwen/qwen3-32b": {
-        "cost_in": 0.29 / 1e6, "cost_out": 0.59 / 1e6, "tps": 662
+        "cost_in": 0.29 / 1e6, "cost_out": 0.59 / 1e6, "tps": 662, "base_latency": 0.25
     },
     "groq/llama-3.3-70b-versatile": {
-        "cost_in": 0.59 / 1e6, "cost_out": 0.79 / 1e6, "tps": 394
+        "cost_in": 0.59 / 1e6, "cost_out": 0.79 / 1e6, "tps": 300, "base_latency": 0.5
     },
-    "groq/llama-3.1-8b-instant": {
-        "cost_in": 0.05 / 1e6, "cost_out": 0.08 / 1e6, "tps": 840
+    "groq/openai/gpt-oss-120b": {
+        "cost_in": 0.15 / 1e6, "cost_out": 0.60 / 1e6, "tps": 500, "base_latency": 0.3
+    },
+    "groq/moonshotai/kimi-k2-instruct-0905": {
+        "cost_in": 1.00 / 1e6, "cost_out": 3.00 / 1e6, "tps": 200, "base_latency": 0.6
     }
 }
 
-# --- 2. AGENT CLASS (THE BRAIN) ---
+# --- 2. AGENT LOGIC ---
 class MarketAgent:
     def __init__(self, model_id):
         self.id = model_id
         self.bankroll = 10.00
-        
-        if model_id not in MODEL_CATALOG:
-            raise ValueError(f"CRITICAL ERROR: Model '{model_id}' not found in catalog. Check your spelling.")
-            
         self.specs = MODEL_CATALOG[model_id]
         
-        # Pure Thompson Sampling Priors
-        self.alpha = 1.0 
-        self.beta = 1.0
+        # Session Stats
+        self.session_spend = 0.0
+        self.session_revenue = 0.0
+        self.wins = 0
+        self.losses = 0
+        
+        # Learning Weights
+        self.skills = {cat: {'alpha': 1.0, 'beta': 1.0} for cat in VALID_CATEGORIES}
 
-    def calculate_bid(self, self_assessment_score):
-        """
-        Pure Thompson Sampling modulated by Context.
-        
-        self_assessment_score: float (0.0 to 1.0) - How confident the LLM feels about THIS prompt.
-        """
-        # 1. Sample from History (The "General Skill")
-        # "How good have I been in the past?"
-        historical_prob = np.random.beta(self.alpha, self.beta)
-        
-        # 2. Combine with Context (The "Specific Confidence")
-        # Probability Chain rule: P(Win) = P(Good_Generally) * P(Good_At_This)
-        final_probability = historical_prob * self_assessment_score
-        
-        # 3. Calculate Estimated Cost
-        # Estimate: 500 input tokens + 200 output tokens
-        est_cost = (500 * self.specs['cost_in']) + (200 * self.specs['cost_out'])
-        
-        # 4. Expected Value
-        # EV = (Prob_Win * Reward) - Cost
-        expected_value = (final_probability * REWARD_PER_QUERY) - est_cost
-        
-        # 5. The Bid (Floored at 0)
-        bid = max(0.0, expected_value)
-        
-        return bid, est_cost
+    def export_weights(self):
+        return {
+            "bankroll": self.bankroll,
+            "skills": self.skills,
+            "stats": {
+                "wins": self.wins,
+                "losses": self.losses,
+                "spend": self.session_spend,
+                "revenue": self.session_revenue
+            }
+        }
 
-    def update(self, score, cost):
-        """Standard Bayesian Update"""
-        # 1. Update Beliefs
-        self.alpha += score
-        self.beta += (1.0 - score)
+    def load_weights(self, data):
+        self.bankroll = data.get("bankroll", 10.00)
+        saved_skills = data.get("skills", {})
+        for cat, weights in saved_skills.items():
+            if cat in self.skills:
+                self.skills[cat] = weights
         
-        # 2. Update Bankroll (Revenue is proportional to quality)
-        revenue = REWARD_PER_QUERY * score
-        profit = revenue - cost
+        # Load historical stats
+        stats = data.get("stats", {})
+        self.wins = stats.get("wins", 0)
+        self.losses = stats.get("losses", 0)
+        self.session_spend = stats.get("spend", 0.0)
+        self.session_revenue = stats.get("revenue", 0.0)
+
+    def calculate_bid(self, self_confidence, category, input_char_len, est_output_tokens):
+        cat = category if category in self.skills else "general"
+        alpha = self.skills[cat]['alpha']
+        beta = self.skills[cat]['beta']
+        
+        # 1. Bandit
+        historical_prob = np.random.beta(alpha, beta)
+        final_prob = historical_prob * self_confidence
+        
+        # 2. Economics
+        est_tokens = 150
+        est_latency = self.specs['base_latency'] + (est_tokens / self.specs['tps'])
+        est_input_tokens = input_char_len / 4.0
+        
+        compute_cost = (est_input_tokens * self.specs['cost_in']) + (est_tokens * self.specs['cost_out'])
+        time_penalty = est_latency * TIME_PENALTY_PER_SEC
+        total_cost = compute_cost + time_penalty
+        
+        # 3. Bid
+        expected_revenue = final_prob * REWARD_PER_QUERY
+        bid = max(0.0, expected_revenue - total_cost)
+        return bid, compute_cost
+
+    def update(self, score, total_real_cost, actual_latency, category):
+        cat = category if category in self.skills else "general"
+        
+        # Learning
+        self.skills[cat]['alpha'] += score
+        self.skills[cat]['beta'] += (1.0 - score)
+        
+        # Accounting
+        gross_revenue = REWARD_PER_QUERY * score
+        time_penalty = actual_latency * TIME_PENALTY_PER_SEC
+        net_revenue = max(0.0, gross_revenue - time_penalty)
+        
+        profit = net_revenue - total_real_cost
+        
         self.bankroll += profit
+        self.session_spend += total_real_cost
+        self.session_revenue += net_revenue
         
-        return profit
+        if profit > 0: self.wins += 1
+        else: self.losses += 1
+            
+        # RETURN TUPLE FOR LOGGING
+        return profit, gross_revenue, time_penalty
 
-# --- 3. NETWORK HELPERS ---
+# --- 3. SYSTEM FUNCTIONS ---
+def initialize_market():
+    agents = []
+    loaded_data = {}
+    if os.path.exists(WEIGHTS_FILE):
+        try:
+            with open(WEIGHTS_FILE, 'r') as f:
+                loaded_data = json.load(f)
+            print(f"[DISK] Loaded weights from {WEIGHTS_FILE}")
+        except: pass
 
-def get_self_assessment(model_id, prompt):
-    """
-    Asks the agent to rate the difficulty of the prompt.
-    Returns a float 0.0 (Impossible) to 1.0 (Easy/Confident).
-    """
+    for model_id in MODEL_CATALOG.keys():
+        agent = MarketAgent(model_id)
+        if model_id in loaded_data:
+            agent.load_weights(loaded_data[model_id])
+        agents.append(agent)
+    return agents
+
+def save_market(agents):
+    data = {agent.id: agent.export_weights() for agent in agents}
+    try:
+        with open(WEIGHTS_FILE, 'w') as f:
+            json.dump(data, f, indent=2)
+        print(f"\n[DISK] Saved updated weights to {WEIGHTS_FILE}")
+    except Exception as e:
+        print(f"[DISK] Failed to save weights: {e}")
+
+# --- 4. HELPERS ---
+def classify_and_assess(model_id, prompt):
     system_msg = (
-        "You are a bidding agent. Analyze the difficulty of this query for your capabilities. "
-        "Return valid JSON containing 'confidence_score' (0.0 to 1.0). "
-        "0.0 = I cannot answer this. 1.0 = I can answer perfectly."
+        f"Classify into one: {json.dumps(VALID_CATEGORIES)}.\n"
+        "Rate confidence (0.0 to 1.0).\n"
+        "Estimate tokens (e.g. 50).\n"
+        "Return JSON: {\"category\": \"...\", \"confidence\": 0.9, \"tokens\": 50}"
     )
-    
     try:
         response = completion(
             model=model_id,
-            messages=[
-                {"role": "system", "content": system_msg},
-                {"role": "user", "content": prompt}
-            ],
+            messages=[{"role": "system", "content": system_msg}, {"role": "user", "content": prompt}],
             response_format={"type": "json_object"},
-            temperature=0.1 # Low temp for consistent analysis
+            temperature=0.1
         )
         data = json.loads(response.choices[0].message.content)
-        return float(data.get("confidence_score", 0.5))
-    except Exception as e:
-        # If model is dumb/fails to output JSON, assume low confidence
-        return 0.1
+        cat = data.get("category", "general").lower()
+        if cat not in VALID_CATEGORIES: cat = "general"
+        return float(data.get("confidence", 0.5)), cat, int(data.get("tokens", 100))
+    except:
+        return 0.1, "general", 100
 
 def get_agent_answer(model_id, prompt):
-    """Generates the actual response"""
     try:
         response = completion(
-            model=model_id,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.7
+            model=model_id, messages=[{"role": "user", "content": prompt}]
         )
         return response.choices[0].message.content
-    except Exception as e:
-        return "Error generating response."
+    except: return "Error"
 
 def judge_answer(prompt, answer):
-    """The Unbiased Judge (Gemini)"""
     try:
         response = completion(
-            model="gemini/gemini-1.5-flash",
+            model=JUDGE_MODEL_ID,
             messages=[{
                 "role": "user", 
-                "content": (
-                    f"Rate this answer from 0.0 to 1.0 based on accuracy. "
-                    f"Output ONLY the number.\n\nPrompt: {prompt}\nAnswer: {answer}"
-                )
-            }]
+                "content": f"Rate accuracy 0.0 to 1.0. Be critical and objective. Return JSON: {{\"score\": 0.9}}\n\nPrompt: {prompt}\nAnswer: {answer}"
+            }],
+            response_format={"type": "json_object"}
         )
-        return float(response.choices[0].message.content.strip())
-    except:
-        return 0.5
+        data = json.loads(response.choices[0].message.content)
+        return float(data.get("score", 0.0))
+    except Exception as e:
+        print(f"  [!] Judge Error: {e}")
+        return 0.0
 
-# --- 4. MAIN SIMULATION LOOP ---
-
-def run_simulation(agents_list, prompts):
-    # Initialize Agents
-    market = [MarketAgent(mid) for mid in agents_list]
+# --- 5. MAIN SIMULATION ---
+def run_simulation(market_agents, prompts):
     logs = []
+    print(f"\n--- MARKET OPEN ({len(market_agents)} Agents) ---")
 
-    print(f"\n--- MARKET OPEN: {len(market)} AGENTS ---")
-    print(f"--- REWARD: ${REWARD_PER_QUERY} | THRESHOLD: {QUALITY_THRESHOLD} ---")
-
-    for round_i, prompt in enumerate(prompts):
-        print(f"\n=== Round {round_i+1}: '{prompt[:40]}...' ===")
+    for round_i, prompt_data in enumerate(prompts):
+        prompt_text = prompt_data['text']
+        true_cat = prompt_data['cat']
+        input_len = len(prompt_text)
         
-        # --- A. BIDDING PHASE ---
+        print(f"\n=== ROUND {round_i+1} ===")
+        print(f"Prompt: '{prompt_text[:50]}...' ({true_cat})")
+        
         bids = []
-        for agent in market:
-            if agent.bankroll <= 0: continue # Bankrupt
+        for agent in market_agents:
+            if agent.bankroll <= 0: continue
 
-            # 1. Get Context (Self-Assessment)
-            # "Does this look hard?"
-            self_score = get_self_assessment(agent.id, prompt)
-            
-            # 2. Calculate Bid (Bandit History * Context)
-            bid_amt, est_cost = agent.calculate_bid(self_score)
+            conf, cat, est_toks = classify_and_assess(agent.id, prompt_text)
+            bid_amt, cost = agent.calculate_bid(conf, cat, input_len, est_toks)
             
             if bid_amt > 0:
-                # Calculate mean just for display (alpha / alpha+beta)
-                historical_mean = agent.alpha / (agent.alpha + agent.beta)
-                print(f"  > {agent.id.split('/')[-1]}: "
-                      f"Hist={historical_mean:.2f}, Self={self_score:.2f} -> Bid=${bid_amt:.5f}")
-                
-                bids.append({
-                    "agent": agent, 
-                    "bid": bid_amt, 
-                    "cost": est_cost
-                })
+                bids.append({"agent": agent, "bid": bid_amt, "cost": cost, "cat": cat})
+                print(f"  > {agent.id.split('/')[-1][:15]:<15} | Bid:${bid_amt:.4f}")
 
         if not bids:
-            print("  [!] No bids. Market failed.")
+            print("  [!] Market Failure: No bids.")
             continue
 
-        # --- B. AUCTION RESOLUTION (Vickrey) ---
         bids.sort(key=lambda x: x['bid'], reverse=True)
         winner = bids[0]
-        # Second price rule
         second_price = bids[1]['bid'] if len(bids) > 1 else 0.00001
         
-        print(f"  *** WINNER: {winner['agent'].id.split('/')[-1]} (Pays ${second_price:.5f})")
+        print(f"  --> WINNER: {winner['agent'].id.split('/')[-1]} (Pays ${second_price:.4f})")
 
-        # --- C. EXECUTION & JUDGMENT ---
-        raw_answer = get_agent_answer(winner['agent'].id, prompt)
-        score = judge_answer(prompt, raw_answer)
+        start = time.time()
+        raw_answer = get_agent_answer(winner['agent'].id, prompt_text)
+        duration = time.time() - start
         
-        # --- D. RETRY GATE (The Safety Net) ---
-        actual_cost = second_price + winner['cost']
-        final_profit = 0.0
-        accepted = False
+        print("  ... Judging ...")
+        score = judge_answer(prompt_text, raw_answer)
+        
+        # Real Accounting
+        actual_out_tokens = len(raw_answer) / 4.0
+        actual_in_tokens = input_len / 4.0
+        real_compute_cost = (actual_in_tokens * winner['agent'].specs['cost_in']) + \
+                            (actual_out_tokens * winner['agent'].specs['cost_out'])
+        total_real_bill = second_price + real_compute_cost
 
+        # Update and Unpack Financials
         if score < QUALITY_THRESHOLD:
-            print(f"  [X] REJECTED (Score {score:.2f} < {QUALITY_THRESHOLD})")
-            print(f"  [>] Redirecting to {FALLBACK_MODEL_ID.split('/')[-1]}...")
-            
-            # Punish the agent: Full Cost, Zero Revenue
-            # We treat this as a "Total Loss" for the bandit (score=0.0)
-            final_profit = winner['agent'].update(score=0.0, cost=actual_cost)
-            
+            print(f"  [X] REJECTED (Score {score:.2f})")
+            profit, gross, penalty = winner['agent'].update(0.0, total_real_bill, duration, winner['cat'])
         else:
             print(f"  [✓] ACCEPTED (Score {score:.2f})")
-            # Reward the agent: Cost + Revenue proportional to score
-            final_profit = winner['agent'].update(score=score, cost=actual_cost)
-            accepted = True
+            profit, gross, penalty = winner['agent'].update(score, total_real_bill, duration, winner['cat'])
 
-        print(f"  *** PROFIT: ${final_profit:.5f} | BANKROLL: ${winner['agent'].bankroll:.4f}")
+        # --- DETAILED LOGGING ---
+        print(f"      Latency: {duration:.4f}s  (Penalty: -${penalty:.4f})")
+        print(f"      Revenue: +${gross:.4f}")
+        print(f"      Bill   : -${total_real_bill:.4f}")
+        print(f"      PROFIT : ${profit:.4f}")
 
-        # --- E. LOGGING ---
         logs.append({
-            "round": round_i,
-            "prompt": prompt,
-            "winner": winner['agent'].id,
-            "bid": winner['bid'],
-            "score": score,
-            "accepted": accepted,
-            "profit": final_profit,
-            "bankroll": winner['agent'].bankroll
+            "winner": winner['agent'].id, 
+            "category": winner['cat'], 
+            "score": score, 
+            "profit": profit
         })
-        
-        time.sleep(0.5) # Slight delay to avoid rate limits
+        time.sleep(0.5)
 
     return pd.DataFrame(logs)
 
-# --- 5. EXECUTION ---
+# --- 6. EXECUTION ---
 if __name__ == "__main__":
-    # Define Agents
-    active_agents = list(MODEL_CATALOG.keys())
-    
-    # Define Prompts (Mix of Easy/Hard)
-    test_prompts = [
-        "What is 2 + 2?",
-        "Explain Quantum Chromodynamics in detail.",
-        "Write a python function to reverse a list.",
-        "Who was the first US president?",
-        "Write a 500 word essay on the fall of Rome.",
-        "What color is the sky?",
-        "Solve this differential equation: dy/dx = y * x",
-        "Translate 'Hello' to Spanish.",
-        "Analyze the nuances of 19th century French poetry.",
-        "What is the capital of France?"
-    ]
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--test", action="store_true", help="Run without saving weights")
+    args = parser.parse_args()
 
-    df = run_simulation(active_agents, test_prompts)
+    # 1. Initialize
+    market = initialize_market()
     
-    print("\n--- FINAL RESULTS ---")
-    print(df[["winner", "bid", "score", "accepted", "profit"]])
+    # 2. Load Data
+    try:
+        test_prompts = get_benchmark_prompts(n_total=100)
+    except ImportError:
+        print("Warning: data_loader.py not found. Using manual fallback.")
+        test_prompts = []
+    except Exception as e:
+        print(f"Warning: Loader failed: {e}")
+        test_prompts = []
+
+    # Fallback if loader returns nothing
+    if not test_prompts:
+        print("Using manual fallback list.")
+        test_prompts = [
+            {"text": "What is 2 + 2?", "cat": "math"},
+            {"text": "Write a poem about rust.", "cat": "general"},
+            {"text": "Solve 5x = 20", "cat": "math"},
+            {"text": "Explain quantum physics.", "cat": "general"}
+        ]
+
+    # 3. Run
+    df = run_simulation(market, test_prompts)
+    
+    # 4. Save
+    if not args.test:
+        save_market(market)
+    else:
+        print("\n[TEST MODE] Weights NOT saved.")
+    
+    # 5. Report
+    print("\n" + "="*60)
+    print("FINAL FINANCIAL REPORT")
+    print("="*60)
+    
+    leaderboard = []
+    for agent in market:
+        short_name = agent.id.split('/')[-1]
+        net_profit = agent.session_revenue - agent.session_spend
+        roi = (net_profit / agent.session_spend * 100) if agent.session_spend > 0 else 0.0
+        
+        leaderboard.append({
+            "Agent": short_name,
+            "Wins": agent.wins,
+            "Losses": agent.losses,
+            "Spend": f"${agent.session_spend:.4f}",
+            "Profit": f"${net_profit:.4f}",
+            "ROI": f"{roi:.1f}%",
+            "Bankroll": f"${agent.bankroll:.2f}"
+        })
+        
+    lb_df = pd.DataFrame(leaderboard)
+    print(lb_df.to_string(index=False))
