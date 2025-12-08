@@ -1,40 +1,62 @@
 import random
+import sys
+import time
 from datasets import load_dataset
 
 def get_benchmark_prompts(n_total=10, start_index=0):
-    print(f"--- LOADING {n_total} PROMPTS (Offset: {start_index}) ---")
+    """
+    Loads n_total prompts with a fallback mechanism if Hugging Face fails.
+    """
+    if n_total <= 0:
+        return []
+
+    # 1. CALCULATE SPLIT
+    n_math = max(1, round(n_total * 0.20)) if n_total >= 5 else 1 # Ensure at least 1 math for small tests
+    n_general = n_total - n_math
+    
+    print(f"--- LOADING {n_total} PROMPTS (General: {n_general}, Math: {n_math}) ---", file=sys.stderr)
     
     all_prompts = []
+    random.seed(42)
 
-    # 1. LOAD GSM8k (Math)
+    # 2. LOAD GSM8K (Math)
     try:
-        ds_math = load_dataset("gsm8k", "main", split="test")
-        for row in ds_math:
-            all_prompts.append({"text": row['question'], "cat": "math"})
+        # We try/except the actual download call
+        ds_math = load_dataset("gsm8k", "main", split="test")        
+        math_pool = [
+            {"text": row['question'], "cat": "math"} 
+            for i, row in enumerate(ds_math) if i >= start_index
+        ]
+        
+        n_math_actual = min(n_math, len(math_pool))
+        if n_math_actual > 0:
+            math_samples = random.sample(math_pool, n_math_actual)
+            all_prompts.extend(math_samples)
+            
     except Exception as e:
-        print(f"Error loading GSM8k: {e}")
+        print(f"⚠️ [WARNING] Failed to load GSM8k: {e}", file=sys.stderr)
 
-    # 2. LOAD ALPACA (General) - Direct JSON to avoid security errors
+    # 3. LOAD ALPACA (General)
     url = "https://huggingface.co/datasets/tatsu-lab/alpaca_eval/resolve/main/alpaca_eval.json"
     try:
         ds_alpaca = load_dataset("json", data_files={"test": url}, split="test")
-        for row in ds_alpaca:
-            all_prompts.append({"text": row['instruction'], "cat": "general"})
-    except Exception as e:
-        print(f"Error loading Alpaca: {e}")
+        
+        alpaca_pool = [
+            {"text": row['instruction'], "cat": "general"} 
+            for i, row in enumerate(ds_alpaca) if i >= start_index
+        ]
+        
+        n_general_actual = min(n_general, len(alpaca_pool))
+        if n_general_actual > 0:
+            alpaca_samples = random.sample(alpaca_pool, n_general_actual)
+            all_prompts.extend(alpaca_samples)
 
-    # 3. DETERMINISTIC SHUFFLE (Seed 42)
-    # This guarantees Training (0-200) and Testing (500-520) never share questions
-    random.seed(42) 
+    except Exception as e:
+        print(f"⚠️ [WARNING] Failed to load Alpaca: {e}", file=sys.stderr)
+
+    # 5. FINAL SHUFFLE
     random.shuffle(all_prompts)
     
-    # 4. SLICE
-    end_index = start_index + n_total
-    if end_index > len(all_prompts):
-        print(f"Warning: Looping data (Request {end_index} > Avail {len(all_prompts)})")
-        sliced = all_prompts[start_index:]
-    else:
-        sliced = all_prompts[start_index:end_index]
+    print(f" > Successfully prepared {len(all_prompts)} prompts.", file=sys.stderr)
     
-    print(f" > Loaded {len(sliced)} prompts.")
-    return sliced
+    return all_prompts

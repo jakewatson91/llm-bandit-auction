@@ -9,121 +9,162 @@ import pandas as pd
 from dotenv import load_dotenv
 
 from data_loader import get_benchmark_prompts
-
-from model_config import (
-    MODEL_CATALOG, VALID_CATEGORIES, 
-    FALLBACK_CONFIG, JUDGE_MODELS
-)
+from model_config import MODEL_CATALOG
 from prompts import JUDGE_PROMPT
-from models import call_model
+from models import call_model_with_retry
+from utils import print_leaderboard
 
 load_dotenv()
 
+# --- CONSTANTS ---
 REWARD_PER_QUERY = 0.15
-TIME_PENALTY_PER_SEC = 0.004
-QUALITY_THRESHOLD = 0.8
-WEIGHTS_FILE = "market_weights.json"
+TIME_PENALTY_PER_SEC = 0.002 
+QUALITY_THRESHOLD = 0.7
+WEIGHTS_FILE = "market_weights_dec_8.json"
 CURRENT_JUDGE_INDEX = 0
+CLASSIFIER_INDEX = 0
+MAX_CONSECUTIVE_FAILURES = 3
+EMA_ALPHA = 0.2
+PRINT_SAVE_INTERVAL = 20
+
+# BINARY WORLD: Easy vs Hard
+DIFFICULTY_MULTIPLIERS = { "easy": 1.0, "hard": 2.0 }
+OUTPUT_ESTIMATES = { "easy": 50, "hard": 500 } 
 
 # ---------------- HELPER FUNCTIONS ----------------
 
-def classify_and_assess(model_id, provider, prompt):
+def classify_prompt(prompt):
+    """
+    Binary Router: Determines if prompt is 'easy' or 'hard'.
+    """
+    global CLASSIFIER_INDEX
+
+    classifiers = [k for k, v in MODEL_CATALOG.items() if v.get("is_classifier")]
+    if not classifiers: return "hard", 0.0, 0.0
+
     system_msg = (
-        f"Classify into one: {json.dumps(VALID_CATEGORIES)}.\n"
-        "Rate confidence (0.0 to 1.0).\n"
-        "Estimate tokens.\n"
-        "Return JSON: {\"category\": \"...\", \"confidence\": 0.9, \"tokens\": 100}"
+        "Classify the text as 'easy' (simple questions, creative writing, summarization) "
+        "or 'hard' (math, coding, reasoning, analysis).\n"
+        "Return strict JSON: {\"complexity\": \"easy\"} or {\"complexity\": \"hard\"}"
     )
-    try:
-        raw = call_model(provider, model_id, prompt, system=system_msg)
-        match = re.search(r"\{.*\}", raw, re.DOTALL)
-        if match:
-            data = json.loads(match.group())
-        else:
-            data = json.loads(raw)
+    
+    full_prompt = f"{system_msg}\n\nText: {prompt[:1000]}"
+    
+    for i in range(len(classifiers)):
+        CLASSIFIER_INDEX = (CLASSIFIER_INDEX + i) % len(classifiers)
+        mid = classifiers[CLASSIFIER_INDEX]
+        config = MODEL_CATALOG[mid]
+    
+        # Removed temperature argument
+        res, latency = call_model_with_retry(config['provider'], mid, full_prompt)
+        if res:
+            try:        
+                match = re.search(r"\{.*\}", res, re.DOTALL)
+                if match:
+                    data = json.loads(match.group())
+                    comp = data.get("complexity", "hard")
+                    if comp not in ["easy", "hard"]: comp = "hard"
+
+                    cost = (len(full_prompt)/4 * config.get('cost_in', 0)) + \
+                           (len(res)/4 * config.get('cost_out', 0))
+                    
+                    return comp, cost, latency
+            except Exception: pass
+        print(f"\nClassifier {mid} failed. Rotating...")
         
-        cat = data.get("category", "general")
-        if cat not in VALID_CATEGORIES: cat = "general"
-        return float(data.get("confidence", 0.5)), cat, int(data.get("tokens", 100))
-    except Exception:
-        return 0.5, "general", 100
+    return "hard", 0.0, 0.0
 
 def judge_answer(prompt, answer):
     global CURRENT_JUDGE_INDEX
-    
-    for i in range(len(JUDGE_MODELS)):
-        idx = (CURRENT_JUDGE_INDEX + i) % len(JUDGE_MODELS)
-        judge_conf = JUDGE_MODELS[idx]
+    judges = [k for k, v in MODEL_CATALOG.items() if v.get("is_judge")]
+    if not judges: return None, 0.0
+
+    for i in range(len(judges)):
+        idx = (CURRENT_JUDGE_INDEX + i) % len(judges)
+        mid = judges[idx]
+        config = MODEL_CATALOG[mid]
         
-        # Double Tap Logic
-        for attempt in range(2):
+        msg = f"User Input{prompt}\n\nAgent Answer: {answer}\n\nInstructions: {JUDGE_PROMPT}"
+        cost = (len(msg)/4 * config.get('cost_in', 0)) + (100 * config.get('cost_out', 0))
+
+        # Removed temperature argument
+        res, _ = call_model_with_retry(config['provider'], mid, msg, is_judge=True)
+
+        if res:
             try:
-                msg = f"{prompt}\n\nAnswer: {answer}\n\n{JUDGE_PROMPT}"
-                
-                raw = call_model(judge_conf['provider'], judge_conf['model'], msg)
-                match = re.search(r"\{.*\}", raw, re.DOTALL)
+                match = re.search(r"\{.*\}", res, re.DOTALL)
                 if match:
-                    score = float(json.loads(match.group()).get("score", 0.0))
+                    score = float(json.loads(match.group()).get("score", 0))
                     CURRENT_JUDGE_INDEX = idx
-                    return score
-            except Exception:
-                if attempt == 0:
-                    time.sleep(1)
-                    continue
-                pass 
-                
-    return 0.0
+                    return score, cost
+            except Exception: pass
+        print(f"  ⚠️ Judge {mid} failed. Rotating...")
 
-# ---------------- AGENT ----------------
+    return None, 0.0
 
-class MarketAgent:
+# ---------------- EV ROUTER AGENT ----------------
+
+class ModelEV:
     def __init__(self, model_id):
         self.id = model_id
         self.specs = MODEL_CATALOG[model_id]
         self.provider = self.specs['provider']
-        self.bankroll = 10.0
-        self.wins = 0
-        self.losses = 0
-        self.session_revenue = 0.0
-        self.session_spend = 0.0
-        self.skills = {c: {"alpha": 1.0, "beta": 1.0} for c in VALID_CATEGORIES}
+        self.ema_latency = self.specs.get("base_latency", 2.0)
+        
+        self.skills = {
+            "easy": {"alpha": 1.0, "beta": 1.0},
+            "hard": {"alpha": 1.0, "beta": 1.0}
+        }
+        
+        self.ema_cost_usd = {}
 
     def export_weights(self):
-        return {"bankroll": self.bankroll, "skills": self.skills, "stats": {"wins": self.wins}}
+        return {"skills": self.skills, "ema_latency": self.ema_latency, "ema_cost_usd": self.ema_cost_usd}
 
     def load_weights(self, d):
-        self.bankroll = d.get("bankroll", 10.0)
         self.skills.update(d.get("skills", {}))
-        self.wins = d.get("stats", {}).get("wins", 0)
+        self.ema_latency = d.get("ema_latency", self.specs.get("base_latency", 2.0))
+        self.ema_cost_usd.update(d.get("ema_cost_usd", {}))
 
-    def calculate_bid(self, conf, cat, input_len, est_tokens):
-        stats = self.skills.get(cat, self.skills["general"])
-        # Standard Probability calc
-        prob = np.random.beta(stats["alpha"], stats["beta"]) * conf
+    def calculate_ev(self, complexity, input_len):
+        stats = self.skills.get(complexity, self.skills["hard"])
+        predicted_quality = np.random.beta(stats["alpha"], stats["beta"])
         
-        cost_compute = (input_len/4 * self.specs["cost_in"]) + (est_tokens * self.specs["cost_out"])
-        
-        lat_est = self.specs["base_latency"] + (est_tokens / self.specs["tps"])
-        cost_time = lat_est * TIME_PENALTY_PER_SEC
-        
-        bid = max(0.0, (prob * REWARD_PER_QUERY) - (cost_compute + cost_time))
-        return bid, cost_compute
+        multiplier = DIFFICULTY_MULTIPLIERS.get(complexity, 1.0)
+        expected_revenue = predicted_quality * REWARD_PER_QUERY * multiplier
 
-    def update(self, score, real_cost, latency, cat):
-        if cat in self.skills:
-            self.skills[cat]["alpha"] += score
-            self.skills[cat]["beta"] += (1.0 - score)
-        gross = score * REWARD_PER_QUERY
-        penalty = latency * TIME_PENALTY_PER_SEC
-        net = max(0.0, gross - penalty)
-        profit = net - real_cost
+        # 3. Cost Estimate (EMA vs Estimate)
+        if complexity in self.ema_cost_usd:
+            estimated_compute_cost = self.ema_cost_usd[complexity]
+        else:
+            est_output_tokens = max(OUTPUT_ESTIMATES.get(complexity, 200), input_len // 2) 
+            estimated_compute_cost = (input_len/4 * self.specs["cost_in"]) + \
+                                     (est_output_tokens * self.specs["cost_out"])
+
+        # 4. Time Penalty
+        time_penalty_factor = TIME_PENALTY_PER_SEC / multiplier
+        estimated_time_cost = self.ema_latency * time_penalty_factor
+
+        ev = expected_revenue - (estimated_compute_cost + estimated_time_cost)
+        return ev, predicted_quality, estimated_compute_cost
+
+    def update(self, score, latency, realized_cost, complexity):
+        if latency > 0:
+            self.ema_latency = (EMA_ALPHA * latency) + ((1 - EMA_ALPHA) * self.ema_latency)
         
-        self.bankroll += profit
-        self.session_revenue += net
-        self.session_spend += real_cost
+        if complexity not in self.skills: complexity = "hard"
         
-        if profit > 0: self.wins += 1
-        else: self.losses += 1
+        # Update Cost (EMA)
+        if complexity in self.ema_cost_usd:
+            old_cost = self.ema_cost_usd[complexity]
+            self.ema_cost_usd[complexity] = (EMA_ALPHA * realized_cost) + ((1 - EMA_ALPHA) * old_cost)
+        else:
+            self.ema_cost_usd[complexity] = realized_cost
+            
+        # Quality Update
+        stats = self.skills[complexity]
+        stats["alpha"] += score
+        stats["beta"] += (1.0 - score)
 
 # ---------------- SIMULATION ----------------
 
@@ -132,113 +173,135 @@ def initialize_market(load_weights_file):
     if load_weights_file and os.path.exists(WEIGHTS_FILE):
         with open(WEIGHTS_FILE) as f: 
             saved = json.load(f)
-        print(f"Loaded weights for {len(saved)} agents.")
-    agents = []
-    for mid in MODEL_CATALOG:
-        a = MarketAgent(mid)
-        if mid in saved: a.load_weights(saved[mid])
-        agents.append(a)
-    return agents
+        print(f"Loaded weights for {len(saved)} models.")
+    
+    models = []
+    for mid, specs in MODEL_CATALOG.items():
+        if not specs.get('market_model'): continue
+        m = ModelEV(mid)
+        if mid in saved: m.load_weights(saved[mid])
+        models.append(m)
+    return models
 
-def run_simulation(agents, prompts, train=True, evaluate=False, verbose=False):
+def save_and_exit(models, msg=""):
+    print(f"\n🛑 {msg} Saving weights and exiting...")
+    with open(WEIGHTS_FILE, "w") as f:
+        json.dump({m.id: m.export_weights() for m in models}, f, indent=2)
+    sys.exit(0)
+
+def save_weights(models):
+    print(f"💾 Saving weights for {len(models)} models to {WEIGHTS_FILE}...")
+    with open(WEIGHTS_FILE, "w") as f:
+        json.dump({m.id: m.export_weights() for m in models}, f, indent=2)
+    print("✅ Save complete.")
+
+def run_simulation(models, prompts, train=True, evaluate=False, verbose=False):
     logs = []
-    print(f"\n--- SIMULATION START ({len(prompts)} Prompts) ---")
+    consecutive_failures = 0
+    
+    print(f"\n--- BINARY EV ROUTING ({len(prompts)} Prompts) ---")
 
-    for i, p in enumerate(prompts):
-        text = p['text']
+    for i, prompt_data in enumerate(prompts):
+        prompt_text = prompt_data['text']
         
         if not evaluate:
-            if verbose:
-                print(f"PROMPT [{i+1}]: {text}...")
-            else:
-                print(f"PROMPT [{i+1}]: {text[:80]}...")
+            print(f"PROMPT [{i+1}]: {prompt_text[:80]}..." if not verbose else f"PROMPT [{i+1}]: {prompt_text}")
             print(f"{'-'*60}")
         
-        # 1. Bids
-        bids_data = [] # (bid_val, agent, category)
-        current_wallets = {a.id: a.bankroll for a in agents} 
-        
-        for a in agents:
-            if a.bankroll < 0: continue
-            conf, cat, toks = classify_and_assess(a.id, a.provider, text)
-            bid, _ = a.calculate_bid(conf, cat, len(text), toks)
-            if bid > 0: bids_data.append((bid, a, cat))
-        
-        if not bids_data:
-            if train: print("  > No bids placed.")
-            continue
-            
-        bids_data.sort(key=lambda x: x[0], reverse=True)
-        
-        bid_val, winner, cat = bids_data[0]
-        second_price = bids_data[1][0] if len(bids_data) > 1 else 0.001
+        # --- 1. CLASSIFY ---
+        complexity, classifier_cost, classifier_latency = classify_prompt(prompt_text)
         
         if not evaluate:
-            print("BIDDING WAR:")
-            for b_val, b_agent, b_cat in bids_data:
-                wallet_bal = current_wallets.get(b_agent.id, b_agent.bankroll)
-                print(f"  • {b_agent.id:<35} | Bid: ${b_val:.6f} | Wallet: ${wallet_bal:.6f}")
+             print(f"Routing: {complexity.upper()}")
+
+        # --- 2. SELECT MODEL ---
+        candidates = []
+        for m in models:
+            ev, pred_quality, est_cost = m.calculate_ev(complexity, len(prompt_text))
+            candidates.append((ev, m, pred_quality, est_cost))
+        
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        
+        if not evaluate:
+            print("EV ANALYSIS:")
+            for ev, m, qual, cost in candidates[:5]:
+                print(f"  • {m.id:<35} | Qual: {qual:.2f} | Est.Cost: ${cost:.5f} | EV: {ev:.5f}")
             print(f"{'-'*60}")
-            print(f"🏆 WINNER: {winner.id} (Bid: ${bid_val:.6f} | 2nd: ${second_price:.6f})")
+
+        # --- 3. EXECUTION ---
+        selected_model = None
+        model_response = None
         
-        # 2. Exec
-        start = time.time()
-        try:
-            answer = call_model(winner.provider, winner.id, text)
-        except Exception as e:
-            if train: print(f"[ERROR] Execution failed: {e}")
-            answer = "Error"
-        if verbose:
-            print(f"  > Answer: {answer}")
-        lat = time.time() - start
+        for ev, m, _, _ in candidates:
+            # Removed temperature argument
+            model_response, latency = call_model_with_retry(
+                m.provider, m.id, prompt_text
+            )
+
+            if model_response is None:
+                print(f"  ⚠️ {m.id} failed. Penalizing...")
+                m.update(0.0, 0.0, 0.0, complexity) 
+                continue 
+
+            selected_model = m
+            if not evaluate:
+                print(f"🚀 SELECTED: {selected_model.id} (Latency: {latency:.3f}s)")
+            break 
+
+        if selected_model is None:
+            print(f"  🛑 FATAL: All models failed.")
+            consecutive_failures += 1
+            if consecutive_failures >= MAX_CONSECUTIVE_FAILURES: save_and_exit(models, "All APIs failed")
+            continue 
+
+        # --- 4. JUDGE ---
+        quality_score, total_judge_cost = judge_answer(prompt_text, model_response)
         
-        # 3. Judge
-        score = judge_answer(text, answer)
+        if quality_score is None:
+            consecutive_failures += 1
+            print(f"  ⚠️ FAIL: Judge crashed. ({consecutive_failures}/{MAX_CONSECUTIVE_FAILURES})")
+            if consecutive_failures >= MAX_CONSECUTIVE_FAILURES: save_and_exit(models, "Judges broken")
+            continue 
         
-        # 4. Settlement
-        real_cost_compute = (len(text)/4 * winner.specs["cost_in"]) + (len(answer)/4 * winner.specs["cost_out"])
-        bill = second_price + real_cost_compute
-        lat_penalty = lat * TIME_PENALTY_PER_SEC
+        # --- 5. STATS & UPDATE ---
+        token_cost = (len(prompt_text)/4 * selected_model.specs["cost_in"]) + \
+                     (len(model_response)/4 * selected_model.specs["cost_out"])
+        realized_compute_cost = token_cost + classifier_cost + total_judge_cost
         
-        is_failure = score < QUALITY_THRESHOLD
-        effective_score = 0.0 if is_failure else score
-        revenue = effective_score * REWARD_PER_QUERY
-        final_profit = revenue - (lat_penalty + bill)
+        is_failure = quality_score < QUALITY_THRESHOLD
+        multiplier = DIFFICULTY_MULTIPLIERS.get(complexity, 1.0)
+        revenue = (quality_score * REWARD_PER_QUERY * multiplier) if not is_failure else 0.0
+        net_profit = revenue - (realized_compute_cost + (latency * TIME_PENALTY_PER_SEC))
 
         if not evaluate:
             print(f"📊 REPORT:")
-            print(f"  • Latency:       {lat:.3f}s (Penalty: -${lat_penalty:.6f})")
-            print(f"  • Score:         {score:.2f} " + ("[FAIL] -> Effective Revenue: $0.00" if is_failure else f"[PASS] -> Revenue: +${revenue:.6f}"))
-            print(f"  ------------------------------------------------")
-            print(f"  + Revenue:       ${revenue:.6f}")
-            print(f"  - Latency Cost:  ${lat_penalty:.6f}")
-            print(f"  - 2nd Price:     ${second_price:.6f}")
-            print(f"  - Compute Cost:  ${real_cost_compute:.6f}")
-            print(f"  ------------------------------------------------")
-            print(f"  = NET PROFIT:    ${final_profit:.6f}")
-        
-        if is_failure:
-            if train: print(f"  ⚠️  [FAIL] Triggering fallback...")
-            try:
-                call_model(FALLBACK_CONFIG['provider'], FALLBACK_CONFIG['model'], text)
-            except: pass
-            winner.update(0.0, bill, lat, cat)
+            print(f"  • Score:         {quality_score:.2f} " + ("[FAIL]" if is_failure else "[PASS]"))
+            print(f"  • Real Cost:     ${realized_compute_cost:.6f}")
+            print(f"  • Net Utility:   ${net_profit:.6f}")
+            print(f"{'='*60}\n")
         else:
-            winner.update(score, bill, lat, cat)
-            
+             print(f"   [{i+1}/{len(prompts)}] Selected: {selected_model.id:<25} | Score: {quality_score:.4f} | Latency: {latency:.4f}s", flush=True)
+
+        selected_model.update(quality_score, latency, realized_compute_cost, complexity)
+        consecutive_failures = 0
+        
         logs.append({
-            "winner": winner.id, 
-            "category": cat, 
-            "score": score, 
-            "profit": final_profit, 
-            "latency": lat,
-            "compute_cost": real_cost_compute 
+            "winner": selected_model.id, 
+            "category": "simple",
+            "complexity": complexity,
+            "score": quality_score, 
+            "profit": net_profit, 
+            "latency": latency + classifier_latency, 
+            "compute_cost": realized_compute_cost
         })
         
-        if not evaluate:
-            print(f"\n💵 SETTLEMENT: {winner.id} New Bankroll: ${winner.bankroll:.6f}")
-            print(f"{'='*60}\n")
+        if (i + 1) % PRINT_SAVE_INTERVAL == 0:
+            if train:
+                save_weights(models)
+                print(f"--- PERIODIC SAVE at Round {i+1} ---")
+            print_leaderboard(pd.DataFrame(logs), i + 1, len(prompts))
 
+        time.sleep(4) 
 
     return pd.DataFrame(logs)
 
@@ -246,31 +309,19 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--test", action="store_true")
     parser.add_argument("--n_train", type=int, default=5)
-    parser.add_argument("--verbose", action="store_true", help="prints full prompts and answers")
+    parser.add_argument("--verbose", action="store_true")
+    parser.add_argument("--start_index", type=int, default=0)
     args = parser.parse_args()
     
-    prompts = get_benchmark_prompts(n_total=args.n_train)
-
-    market = initialize_market(load_weights_file=(not args.test))
-    df = run_simulation(market, prompts, train=(not args.test), verbose=args.verbose)
+    prompts = get_benchmark_prompts(n_total=args.n_train, start_index=args.start_index)
+    models = initialize_market(load_weights_file=(not args.test))
     
+    df = pd.DataFrame()
+    df = run_simulation(models, prompts, train=(not args.test), verbose=args.verbose)
+        
     if not args.test:
-        with open(WEIGHTS_FILE, "w") as f:
-            json.dump({a.id: a.export_weights() for a in market}, f, indent=2)
-            
-    print("\n" + "="*80)
-    print("🏆 MARKET LEADERBOARD")
-    print("="*80)
-    if not df.empty:
-        stats = df.groupby("winner").agg({"score": ["count", "mean"], "profit": "sum"})
-        stats.columns = ["Wins", "Avg Score", "Total Profit"]
-        stats = stats.sort_values(by="Total Profit", ascending=False)
-        print(stats.to_string())
-        print("-" * 80)
-        print("\n📝 TRANSACTION LOG:")
-        print(df.to_string(index=False))
-        print("-" * 80)
-        print(f"💰 TOTAL SESSION PROFIT: ${df['profit'].sum():.6f}")
-    else:
-        print("No transactions recorded.")
+        save_weights(models)
+
+    if not df.empty:   
+        print_leaderboard(df)
     print("="*80 + "\n")

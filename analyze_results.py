@@ -2,40 +2,44 @@ import pandas as pd
 import numpy as np
 from scipy import stats
 import matplotlib.pyplot as plt
+import matplotlib.cm as cm
 import sys
 import os
 
 # --- CONFIGURATION ---
-SIGNIFICANCE_LEVEL = 0.05  # Alpha for t-test
-CONFIDENCE_DELTA = 0.05    # Delta for Hoeffding (1 - delta = 95% confidence)
+SIGNIFICANCE_LEVEL = 0.05
+CONFIDENCE_DELTA = 0.05
+benchmark_file = "benchmark_results_dec_5.csv"
+
+# --- PLOT NAMES ---
+PLOT_CONFIDENCE = "score_confidence_plot_clean_200.png"
+PLOT_COST_LATENCY = "cost_vs_latency_scatter_clean_200.png"
+PLOT_PERFORMANCE = "cumulative_progress_plot_clean_200.png"
+PLOT_PARETO = "pareto_efficiency_plot_200.png"
 
 # --- STATISTICAL FUNCTIONS ---
 
 def calculate_hoeffding_epsilon(N, delta):
-    """
-    Calculates the Hoeffding bound (epsilon) for a given sample size (N) and confidence risk (delta).
-    Assumes score range (b-a) = 1 (since scores are 0-1).
-    """
-    if N <= 0:
-        return 0
-    # Hoeffding Margin of Error: epsilon = sqrt( ln(2/delta) / (2 * N) )
-    epsilon = np.sqrt(np.log(2 / delta) / (2 * N))
-    return epsilon
+    if N <= 0: return 0
+    return np.sqrt(np.log(2 / delta) / (2 * N))
+
+def calculate_min_hoeffding_samples(delta, margin):
+    """Calculates N required to detect a specific margin with 1-delta confidence."""
+    if margin <= 0: return float('inf')
+    # N = ln(2 / delta) / (2 * margin^2)
+    numerator = np.log(2 / delta)
+    denominator = 2 * (margin ** 2)
+    return np.ceil(numerator / denominator)
 
 def run_statistical_analysis(df: pd.DataFrame, baseline_system: str, market_system: str = "Market"):
-    """
-    Runs Hoeffding and Paired T-Test comparing Market to a specified Baseline.
-    """
     print(f"\n🔬 Running Statistical Analysis: {market_system} vs. {baseline_system}")
     
-    # 1. Prepare Data
-    # Get the raw list of scores (0s and 1s) for each system
-    df_baseline = df[df['System'] == baseline_system].reset_index()
-    df_market = df[df['System'] == market_system].reset_index()
+    df_baseline = df[df['System'] == baseline_system]
+    df_market = df[df['System'] == market_system]
 
     N = len(df_market)
     if N == 0 or len(df_baseline) != N:
-        print("❌ Error: Cannot run analysis. Sample sizes do not match or are zero.")
+        print(f"❌ Error: Sample sizes mismatch (Market: {N}, Baseline: {len(df_baseline)}). Skipping.")
         return
 
     market_scores = df_market['Score'].values
@@ -45,65 +49,46 @@ def run_statistical_analysis(df: pd.DataFrame, baseline_system: str, market_syst
     baseline_mean = baseline_scores.mean()
     
     print(f"Sample Size (N): {N}")
-    print(f"Market Mean Score: {market_mean:.6f}")
-    print(f"{baseline_system} Mean Score: {baseline_mean:.6f}")
-    print("-" * 50)
+    print(f"Market Mean: {market_mean:.4f} | {baseline_system} Mean: {baseline_mean:.4f}")
     
-    # --- A. Hoeffding's Inequality ---
+    # --- HOEFFDING TEST ---
     epsilon = calculate_hoeffding_epsilon(N, CONFIDENCE_DELTA)
-    
-    print(f"Hoeffding's Inequality (Confidence: {1 - CONFIDENCE_DELTA:.0%} / Risk: {CONFIDENCE_DELTA})")
-    print(f"Tolerance (epsilon): +/- {epsilon:.4f}")
-    
-    # Market Confidence Interval (CI)
     market_ci_low = market_mean - epsilon
-    market_ci_high = min(1.0, market_mean + epsilon) # Cap CI at 1.0 since score can't exceed 1
-    print(f"True Market Score is in [{market_ci_low:.4f}, {market_ci_high:.4f}]")
-
-    # Conclusion check
-    is_better_confidently = market_ci_low > baseline_mean
-    if is_better_confidently:
-        print(f"✅ Hoeffding: Market is CONFIDENTLY better than Baseline because the entire CI is above the baseline mean.")
-    elif market_mean > baseline_mean:
-        print(f"⚠️ Hoeffding: Market is numerically better, but the CI overlaps with the baseline mean.")
-    else:
-        print(f"❌ Hoeffding: Market is numerically worse or statistically tied with the baseline.")
-
-    print("-" * 50)
-
-    # --- B. Paired T-Test ---
-    t_statistic, p_two_tailed = stats.ttest_rel(market_scores, baseline_scores)
     
-    # One-tailed p-value for H_a: mean(Market) > mean(Baseline)
-    if t_statistic > 0:
-        p_one_tailed = p_two_tailed / 2
+    if market_ci_low > baseline_mean:
+        print(f"✅ Hoeffding: Market is CONFIDENTLY better (Lower CI {market_ci_low:.4f} > Baseline Mean).")
     else:
-        # If the T-statistic is negative or zero, we cannot claim Market is better, 
-        # so the one-tailed p-value remains high (0.5 or greater).
-        p_one_tailed = 1 - (p_two_tailed / 2) 
+        print(f"❌ Hoeffding: Market is NOT confidently better (CI overlaps or falls below baseline).")
 
-    print("Paired T-Test (One-Tailed: Market > Baseline)")
-    print(f"T-Statistic: {t_statistic:.4f}")
-    print(f"P-Value (One-Tailed): {p_one_tailed:.4f}")
-    
-    is_significant = p_one_tailed < SIGNIFICANCE_LEVEL
-    if is_significant:
-        print(f"✅ T-Test: Difference is STATISTICALLY SIGNIFICANT at the {SIGNIFICANCE_LEVEL} level.")
+    # --- T-TEST ---
+    t_stat, p_two = stats.ttest_rel(market_scores, baseline_scores)
+    p_one = p_two / 2 if t_stat > 0 else 1.0 - (p_two / 2)
+
+    if p_one < SIGNIFICANCE_LEVEL:
+        print(f"✅ T-Test: Difference is SIGNIFICANT (p={p_one:.4f}).")
     else:
-        print(f"❌ T-Test: Difference is NOT statistically significant at the {SIGNIFICANCE_LEVEL} level.")
-        
-    return market_mean, baseline_mean, epsilon, is_better_confidently, is_significant
+        print(f"❌ T-Test: Difference is NOT significant (p={p_one:.4f}).")
 
-# --- VISUALIZATION FUNCTIONS (Nicer Plots) ---
+    # --- REQUIRED SAMPLE SIZE ---
+    required_margin = 0.05
+    n_required = calculate_min_hoeffding_samples(CONFIDENCE_DELTA, required_margin)
+    print(f"📊 Samples required to detect {required_margin} margin (95% CI): {int(n_required)}")
+
+# --- VISUALIZATION FUNCTIONS ---
+
+def set_plot_style():
+    """Safely sets a clean plot style compatible with different Matplotlib versions."""
+    try:
+        plt.style.use('seaborn-v0_8-whitegrid')
+    except OSError:
+        # Fallback for older matplotlib versions
+        plt.style.use('seaborn-whitegrid')
 
 def create_confidence_plot(df: pd.DataFrame):
-    """Visualizes the mean scores and Hoeffding confidence intervals."""
-    plt.style.use('seaborn-v0_8-whitegrid')
+    set_plot_style()
     
     grouped = df.groupby('System')['Score'].agg(['mean', 'count'])
-    grouped['N'] = grouped['count']
-    grouped['epsilon'] = grouped['N'].apply(lambda n: calculate_hoeffding_epsilon(n, CONFIDENCE_DELTA))
-    grouped['ci_low'] = grouped['mean'] - grouped['epsilon']
+    grouped['epsilon'] = grouped['count'].apply(lambda n: calculate_hoeffding_epsilon(n, CONFIDENCE_DELTA))
     
     systems = grouped.index
     means = grouped['mean'].values
@@ -111,155 +96,181 @@ def create_confidence_plot(df: pd.DataFrame):
 
     fig, ax = plt.subplots(figsize=(10, 6))
     
-    # Assign specific colors, making 'Market' stand out
-    colors = ['gray'] * len(systems)
+    # Color logic
+    colors = ['#bdc3c7'] * len(systems) # Default Gray
     if 'Market' in systems:
-        market_index = systems.get_loc('Market')
-        colors[market_index] = 'royalblue'
+        colors[systems.get_loc('Market')] = '#2980b9' # Blue
 
-    ax.bar(systems, means, yerr=errors, capsize=6, color=colors, alpha=0.8)
+    # Use Horizontal bars (barh) to prevent label overlap
+    y_pos = np.arange(len(systems))
+    ax.barh(y_pos, means, xerr=errors, capsize=5, color=colors, alpha=0.9)
     
-    ax.set_ylim(0, 1.05)
-    ax.set_ylabel("Average Score")
-    ax.set_title(f"Score Comparison with {1 - CONFIDENCE_DELTA:.0%} Hoeffding Confidence Intervals")
+    ax.set_yticks(y_pos)
+    ax.set_yticklabels(systems, fontsize=10)
+    ax.set_xlabel("Average Score")
+    ax.set_xlim(0, 1.1)
+    ax.set_title(f"Score Comparison with {1 - CONFIDENCE_DELTA:.0%} Hoeffding CI")
     
-    # Add labels for mean
-    for i, system in enumerate(systems):
-        mean_val = means[i]
-        ax.text(i, mean_val + 0.03, f"{mean_val:.3f}", ha='center', color='black', fontsize=10, fontweight='bold')
-
-    plt.xticks(rotation=15, ha="right")
     plt.tight_layout()
-    plt.savefig("score_confidence_plot_clean.png")
-    print("📈 Visualization saved to 'score_confidence_plot_clean.png'")
-    
+    plt.savefig(PLOT_CONFIDENCE)
+    plt.close() # Close memory
+    print(f"📈 Saved: {PLOT_CONFIDENCE}")
 
 def create_cost_vs_latency_plot(df: pd.DataFrame):
-    """Visualizes the Cost vs. Latency for every run across all systems."""
-    plt.style.use('seaborn-v0_8-deep') 
+    set_plot_style()
     plt.figure(figsize=(10, 7))
     
     systems = df['System'].unique()
     
-    # Use a color map for distinct colors
-    cmap = plt.cm.get_cmap('Dark2', len(systems))
+    # Safe colormap retrieval
+    cmap = plt.get_cmap('Dark2') 
     
     for i, system in enumerate(systems):
         subset = df[df['System'] == system]
         plt.scatter(
             subset['Latency'], 
-            subset['Cost'] * 1000, # Convert USD to mUSD (Millicent) for readability
+            subset['Cost'] * 1000, 
             label=system, 
-            alpha=0.7,
-            s=80, 
-            edgecolors='k', 
-            linewidths=0.5,
-            color=cmap(i)
+            alpha=0.7, 
+            edgecolors='white',
+            color=cmap(i % 8) # Modulo to prevent index error
         )
 
     plt.xscale('log') 
     plt.yscale('log') 
-    plt.xlabel("Latency per Prompt (Seconds, Log Scale)")
-    plt.ylabel("Cost per Prompt (mUSD - Millicent, Log Scale)")
-    plt.title("Trade-off: Latency vs. Cost per Execution (Log-Log Scale)")
-    plt.legend(loc='upper left', title="System", fontsize=9)
-    plt.grid(True, which="both", ls="--", linewidth=0.3, alpha=0.5)
+    plt.xlabel("Latency (s) [Log]")
+    plt.ylabel("Cost (mUSD) [Log]")
+    plt.title("Latency vs. Cost per Prompt")
+    plt.legend()
     plt.tight_layout()
-    plt.savefig("cost_vs_latency_scatter_clean.png")
-    print("📈 Visualization saved to 'cost_vs_latency_scatter_clean.png'")
-    
+    plt.savefig(PLOT_COST_LATENCY)
+    plt.close()
+    print(f"📈 Saved: {PLOT_COST_LATENCY}")
 
 def create_cumulative_performance_plot(df: pd.DataFrame):
-    """Visualizes cumulative cost and running average score per system."""
-    plt.style.use('seaborn-v0_8-whitegrid')
-    
+    set_plot_style()
     systems = df['System'].unique()
-    fig, ax1 = plt.subplots(figsize=(12, 6))
     
-    # --- Y-Axis 1: Cumulative Cost (Blue tones) ---
-    ax1.set_xlabel("Prompt Index (Test Progress)")
-    ax1.set_ylabel("Cumulative Cost (USD)", color='#0066cc', fontweight='bold')
+    # Use 2 rows instead of twin-axis for better readability if "broken"
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
     
-    # --- Y-Axis 2: Running Average Score (Red/Orange tones) ---
-    ax2 = ax1.twinx()
-    ax2.set_ylabel("Running Average Score", color='#ff6600', fontweight='bold')
-    ax2.set_ylim(0, 1.05) 
+    cmap = plt.get_cmap('Dark2')
     
-    cmap = plt.cm.get_cmap('Dark2', len(systems))
-    
-    # Store lines/labels for a unified legend
-    all_lines = []
-    all_labels = []
-
     for i, system in enumerate(systems):
-        subset = df[df['System'] == system].copy().reset_index(drop=True)
-        subset['Cumulative_Cost'] = subset['Cost'].cumsum()
-        subset['Running_Score'] = subset['Score'].expanding().mean()
+        subset = df[df['System'] == system].reset_index(drop=True)
+        color = cmap(i % 8)
         
-        # Plot Cost (Solid line)
-        line1, = ax1.plot(
-            subset.index + 1, 
-            subset['Cumulative_Cost'], 
-            label=f"{system} Cost", 
-            color=cmap(i), 
-            linestyle='-', 
-            linewidth=2
-        )
-        # Plot Score (Dashed line)
-        line2, = ax2.plot(
-            subset.index + 1, 
-            subset['Running_Score'], 
-            label=f"{system} Score", 
-            color=cmap(i), 
-            linestyle='--', 
-            linewidth=2
-        )
-        all_lines.extend([line1, line2])
-        all_labels.extend([f'{system} Cost', f'{system} Score'])
+        # Plot Cost
+        ax1.plot(subset.index + 1, subset['Cost'].cumsum(), label=system, color=color, linewidth=2)
+        
+        # Plot Score
+        ax2.plot(subset.index + 1, subset['Score'].expanding().mean(), label=system, color=color, linewidth=2, linestyle='--')
 
-
-    ax1.tick_params(axis='y', labelcolor='#0066cc')
-    ax2.tick_params(axis='y', labelcolor='#ff6600')
+    ax1.set_ylabel("Cumulative Cost ($)")
+    ax1.legend(loc='upper left')
+    ax1.set_title("Cumulative Cost")
     
-    ax1.legend(all_lines, all_labels, loc='center left', bbox_to_anchor=(1.05, 0.5), title="System Metric")
+    ax2.set_ylabel("Running Avg Score")
+    ax2.set_xlabel("Prompt Index")
+    ax2.set_ylim(0, 1.05)
+    ax2.set_title("Performance Stability")
     
-    plt.title("Cumulative Benchmark Progress: Cost & Running Average Score")
     plt.tight_layout()
-    plt.savefig("cumulative_progress_plot_clean.png")
-    print("📈 Visualization saved to 'cumulative_progress_plot_clean.png'")
-    
+    plt.savefig(PLOT_PERFORMANCE)
+    plt.close()
+    print(f"📈 Saved: {PLOT_PERFORMANCE}")
 
-# --- MAIN EXECUTION BLOCK ---
+def create_pareto_frontier_plot(df: pd.DataFrame):
+    set_plot_style()
+    plt.figure(figsize=(12, 8))
+    
+    # 1. Aggregate Data
+    summary = df.groupby('System').agg({
+        'Cost': 'mean',
+        'Score': 'mean',
+        'Latency': 'mean'
+    }).reset_index()
+
+    # 2. Identify the Pareto Frontier
+    sorted_data = summary.sort_values('Cost')
+    frontier_costs = []
+    frontier_scores = []
+    current_max_score = -1.0
+    
+    for _, row in sorted_data.iterrows():
+        if row['Score'] > current_max_score:
+            frontier_costs.append(row['Cost'])
+            frontier_scores.append(row['Score'])
+            current_max_score = row['Score']
+            
+    plt.plot(frontier_costs, frontier_scores, 'k--', alpha=0.3, label='Pareto Frontier')
+
+    # 3. Create Scatter Plot
+    sc = plt.scatter(
+        summary['Cost'], 
+        summary['Score'], 
+        c=summary['Latency'], 
+        cmap='RdYlGn_r', 
+        s=150, 
+        edgecolors='black',
+        alpha=0.9,
+        zorder=10
+    )
+
+    # 4. Annotate Points
+    for i, row in summary.iterrows():
+        label = row['System'].replace('Baseline (', '').replace(')', '')
+        weight = 'bold' if 'Market' in label else 'normal'
+        size = 12 if 'Market' in label else 9
+        plt.text(row['Cost'] * 1.05, row['Score'], label, fontsize=size, fontweight=weight, verticalalignment='center')
+
+    # 5. Formatting
+    plt.xscale('log')
+    import matplotlib.ticker as mticker
+    plt.gca().xaxis.set_major_formatter(mticker.FuncFormatter(lambda y, _: '${:g}'.format(y)))
+    
+    plt.xlabel('Average Cost ($) [Log Scale]', fontsize=12)
+    plt.ylabel('Average Score (0-1)', fontsize=12)
+    plt.title('Market Efficiency: Score vs. Cost (Color = Latency)', fontsize=14)
+    plt.grid(True, which="both", ls="-", alpha=0.2)
+    
+    cbar = plt.colorbar(sc)
+    cbar.set_label('Avg Latency (seconds)', rotation=270, labelpad=15)
+
+    plt.tight_layout()
+    plt.savefig(PLOT_PARETO)
+    plt.close()
+    print(f"📈 Saved: {PLOT_PARETO}")
+
+# --- MAIN ---
 
 if __name__ == "__main__":
-    try:
-        # Check if the results file exists
-        if not os.path.exists("benchmark_results.csv"):
-            print("Error: 'benchmark_results.csv' not found. Please run the main benchmark script first to generate the data.")
-            sys.exit(1)
-            
-        df = pd.read_csv("benchmark_results.csv")
-    except Exception as e:
-        print(f"Error loading data: {e}")
+    if not os.path.exists(benchmark_file):
+        print(f"Error: {benchmark_file} not found.")
         sys.exit(1)
         
-    # --- 1. Statistical Analysis ---
+    full_df = pd.read_csv(benchmark_file)
+
+    market_df = full_df[full_df['System'] == 'Market']
+    market_size = len(market_df)
+
+    # to solve sample mismatches due to failures etc.
+    df = full_df.groupby('System').head(market_size).reset_index(drop=True)
+    # Replace all NaN scores with 0.0
+    df['Score'] = df['Score'].fillna(0.0)
     
-    # Identify all baselines
     baselines = [s for s in df['System'].unique() if s.startswith('Baseline')]
     market_system = "Market"
-    
-    if baselines:
-        # Compare Market against the lowest performing baseline (to make the strongest non-superiority claim)
-        baseline_scores = df[df['System'].str.startswith('Baseline')].groupby('System')['Score'].mean()
-        comparison_baseline = baseline_scores.idxmin()
-        run_statistical_analysis(df, comparison_baseline, market_system)
+
+    if not baselines:
+        print("No Baselines found.")
     else:
-        print("No Baselines found in the data to compare against.")
+        for baseline in baselines:
+            run_statistical_analysis(df, baseline, market_system)
 
-    # --- 2. Visualization ---
-
-    # Create the visualization for ALL systems
+    # 2. Run Visualizations
+    print("\ngenerating plots...")
     create_confidence_plot(df)
     create_cost_vs_latency_plot(df)
     create_cumulative_performance_plot(df)
+    create_pareto_frontier_plot(df)

@@ -1,0 +1,738 @@
+{
+  "llama-3.1-8b-instant": {
+    "bankroll": 9.508988344361764,
+    "skills": {
+      "coding": {
+        "easy": {
+          "alpha": 1.0,
+          "beta": 1.0
+        },
+        "medium": {
+          "alpha": 1.1875093437467659,
+          "beta": 1.812490656253234
+        },
+        "hard": {
+          "alpha": 1.0,
+          "beta": 1.0
+        }
+      },
+      "math": {
+        "easy": {
+          "alpha": 3.677259931786611,
+          "beta": 4.322740068213388
+        },
+        "medium": {
+          "alpha": 1.0,
+          "beta": 1.0
+        },
+        "hard": {
+          "alpha": 1.0,
+          "beta": 1.0
+        }
+      },
+      "creative": {
+        "easy": {
+          "alpha": 1.0,
+          "beta": 1.0
+        },
+        "medium": {
+          "alpha": 2.265326498966937,
+          "beta": 1.734673501033063
+        },
+        "hard": {
+          "alpha": 1.0,
+          "beta": 1.0
+        }
+      },
+      "reasoning": {
+        "easy": {
+          "alpha": 1.0,
+          "beta": 1.0
+        },
+        "medium": {
+          "alpha": 1.0,
+          "beta": 1.0
+        },
+        "hard": {
+          "alpha": 1.0,
+          "beta": 1.0
+        }
+      },
+      "knowledge": {
+        "easy": {
+          "alpha": 2.260895544879439,
+          "beta": 1.739104455120561
+        },
+        "medium": {
+          "alpha": 1.4379154272766657,
+          "beta": 1.5620845727233343
+        },
+        "hard": {
+          "alpha": 1.0,
+          "beta": 1.0
+        }
+      },
+      "general": {
+        "easy": {
+          "alpha": 1.0,
+          "beta": 1.0
+        },
+        "medium": {
+          "alpha": 7.342600700082627,
+          "beta": 4.657399299917373
+        },
+        "hard": {
+          "alpha": 1.0,
+          "beta": 1.0
+        }
+      }
+    },
+    "stats": {
+      "wins": 6
+    }
+  },
+  "openai/gpt-oss-20b": {
+    "bankroll": 9.649403478353927,
+    "skills": {
+      "coding": {
+        "easy": {
+          "alpha": 1.0,
+          "beta": 1.0
+        },
+        "medium": {
+          "alpha": 1.0,
+          "beta": 1.0
+        },
+        "hard": {
+          "alpha": 1.0,
+          "beta": 1.0
+        }
+      },
+      "math": {
+        "easy": {
+          "alpha": 5.158264107487308,
+          "beta": 2.841735892512692
+        },
+        "medium": {
+          "alpha": 1.0,
+          "beta": 1.0
+        },
+        "hard": {
+          "alpha": 1.0,
+          "beta": 1.0
+        }
+      },
+      "creative": {
+        "easy": {
+          "alpha": 1.0,
+          "beta": 1.0
+        },
+        "medium": {
+          "alpha": 1.8648937773214063,
+          "beta": 2.1351062226785937
+        },
+        "hard": {
+          "alpha": 1.0,
+          "beta": 1.0
+        }
+      },
+      "reasoning": {
+        "easy": {
+          "alpha": 1.0,
+          "beta": 1.0
+        },
+        "medium": {
+          "alpha": 3.515615183077332,
+          "beta": 1.484384816922668
+        },
+        "hard": {
+          "alpha": 1.0,
+          "beta": 1.0
+        }
+      },
+      "knowledge": {
+        "easy": {
+          "alpha": 2.2195965561832147,
+          "beta": 1.780403443816785
+        },
+        "medium": {
+          "alpha": 1.0,
+          "beta": 1.0
+        },
+        "hard": {
+          "alpha": 1.0,
+          "beta": 1.0
+        }
+      },
+      "general": {
+        "easy": {
+          "alpha": 1.0,
+          "beta": 1.0
+        },
+        "medium": {
+          "alpha": 2.6264351990404187,
+          "beta": 2.3735648009595813
+        },
+        "hard": {
+          "alpha": 1.0,
+          "beta": 1.0
+        }
+      }
+    },
+    "stats": {
+      "wins": 4
+    }
+  },
+  "meta-llama/llama-4-scout-17b-16e-instruct": {
+    "bankroll": 9.691216643306692,
+    "skills": {
+      "coding": {
+        "easy": {
+          "alpha": 1.0,
+          "beta": 1.0
+        },
+        "medium": {
+          "alpha": 1.0,
+          "beta": 1.0
+        },
+        "hard": {
+          "alpha": 1.0,
+          "beta": 1.0
+        }
+      },
+      "math": {
+        "easy": {
+          "alpha": 8.013348782539875,
+          "beta": 3.9866512174601256
+        },
+        "medium": {
+          "alpha": 1.0,
+          "beta": 1.0
+        },
+        "hard": {
+          "alpha": 1.0,
+          "beta": 1.0
+        }
+      },
+      "creative": {
+        "easy": {
+          "alpha": 1.0,
+          "beta": 1.0
+        },
+        "medium": {
+          "alpha": 1.0,
+          "beta": 1.0
+        },
+        "hard": {
+          "alpha": 1.0,
+          "beta": 1.0
+        }
+      },
+      "reasoning": {
+        "easy": {
+          "alpha": 1.0,
+          "beta": 1.0
+        },
+        "medium": {
+          "alpha": 1.0,
+          "beta": 1.0
+        },
+        "hard": {
+          "alpha": 1.0,
+          "beta": 1.0
+        }
+      },
+      "knowledge": {
+        "easy": {
+          "alpha": 1.0,
+          "beta": 1.0
+        },
+        "medium": {
+          "alpha": 2.8260453339420994,
+          "beta": 2.1739546660579006
+        },
+        "hard": {
+          "alpha": 1.0,
+          "beta": 1.0
+        }
+      },
+      "general": {
+        "easy": {
+          "alpha": 1.581453148082832,
+          "beta": 1.418546851917168
+        },
+        "medium": {
+          "alpha": 8.82168726265775,
+          "beta": 5.17831273734225
+        },
+        "hard": {
+          "alpha": 1.0,
+          "beta": 1.0
+        }
+      }
+    },
+    "stats": {
+      "wins": 7
+    }
+  },
+  "qwen/qwen3-32b": {
+    "bankroll": 9.384915729393258,
+    "skills": {
+      "coding": {
+        "easy": {
+          "alpha": 1.0,
+          "beta": 1.0
+        },
+        "medium": {
+          "alpha": 1.0,
+          "beta": 1.0
+        },
+        "hard": {
+          "alpha": 1.0,
+          "beta": 1.0
+        }
+      },
+      "math": {
+        "easy": {
+          "alpha": 4.9976458353220305,
+          "beta": 4.0023541646779695
+        },
+        "medium": {
+          "alpha": 2.9564036162635516,
+          "beta": 2.043596383736448
+        },
+        "hard": {
+          "alpha": 1.0,
+          "beta": 1.0
+        }
+      },
+      "creative": {
+        "easy": {
+          "alpha": 1.2994074458744058,
+          "beta": 1.7005925541255942
+        },
+        "medium": {
+          "alpha": 1.0,
+          "beta": 1.0
+        },
+        "hard": {
+          "alpha": 1.0,
+          "beta": 1.0
+        }
+      },
+      "reasoning": {
+        "easy": {
+          "alpha": 1.0,
+          "beta": 1.0
+        },
+        "medium": {
+          "alpha": 2.2401386488158375,
+          "beta": 1.7598613511841625
+        },
+        "hard": {
+          "alpha": 1.0,
+          "beta": 1.0
+        }
+      },
+      "knowledge": {
+        "easy": {
+          "alpha": 2.442564416283356,
+          "beta": 1.5574355837166438
+        },
+        "medium": {
+          "alpha": 1.7318950839594325,
+          "beta": 1.2681049160405675
+        },
+        "hard": {
+          "alpha": 1.0,
+          "beta": 1.0
+        }
+      },
+      "general": {
+        "easy": {
+          "alpha": 1.3892334195267184,
+          "beta": 1.6107665804732816
+        },
+        "medium": {
+          "alpha": 6.548180460393677,
+          "beta": 4.451819539606323
+        },
+        "hard": {
+          "alpha": 1.0,
+          "beta": 1.0
+        }
+      }
+    },
+    "stats": {
+      "wins": 1
+    }
+  },
+  "llama-3.3-70b-versatile": {
+    "bankroll": 9.647425266806023,
+    "skills": {
+      "coding": {
+        "easy": {
+          "alpha": 1.0,
+          "beta": 1.0
+        },
+        "medium": {
+          "alpha": 1.4287666921295943,
+          "beta": 1.5712333078704057
+        },
+        "hard": {
+          "alpha": 1.0,
+          "beta": 1.0
+        }
+      },
+      "math": {
+        "easy": {
+          "alpha": 6.1020618469511305,
+          "beta": 2.897938153048869
+        },
+        "medium": {
+          "alpha": 1.8849006667425199,
+          "beta": 2.11509933325748
+        },
+        "hard": {
+          "alpha": 1.0,
+          "beta": 1.0
+        }
+      },
+      "creative": {
+        "easy": {
+          "alpha": 1.0,
+          "beta": 1.0
+        },
+        "medium": {
+          "alpha": 1.0,
+          "beta": 1.0
+        },
+        "hard": {
+          "alpha": 1.0,
+          "beta": 1.0
+        }
+      },
+      "reasoning": {
+        "easy": {
+          "alpha": 1.0,
+          "beta": 1.0
+        },
+        "medium": {
+          "alpha": 2.1149982714382665,
+          "beta": 1.8850017285617335
+        },
+        "hard": {
+          "alpha": 1.0,
+          "beta": 1.0
+        }
+      },
+      "knowledge": {
+        "easy": {
+          "alpha": 1.4495331143421888,
+          "beta": 1.5504668856578112
+        },
+        "medium": {
+          "alpha": 2.710078977145164,
+          "beta": 2.289921022854836
+        },
+        "hard": {
+          "alpha": 1.0,
+          "beta": 1.0
+        }
+      },
+      "general": {
+        "easy": {
+          "alpha": 1.0,
+          "beta": 1.0
+        },
+        "medium": {
+          "alpha": 14.06729215449505,
+          "beta": 5.9327078455049564
+        },
+        "hard": {
+          "alpha": 1.0,
+          "beta": 1.0
+        }
+      }
+    },
+    "stats": {
+      "wins": 13
+    }
+  },
+  "openai/gpt-oss-120b": {
+    "bankroll": 9.818303744954523,
+    "skills": {
+      "coding": {
+        "easy": {
+          "alpha": 1.0,
+          "beta": 1.0
+        },
+        "medium": {
+          "alpha": 1.0,
+          "beta": 1.0
+        },
+        "hard": {
+          "alpha": 1.0,
+          "beta": 1.0
+        }
+      },
+      "math": {
+        "easy": {
+          "alpha": 7.241414094808825,
+          "beta": 2.7585859051911745
+        },
+        "medium": {
+          "alpha": 1.0,
+          "beta": 1.0
+        },
+        "hard": {
+          "alpha": 1.0,
+          "beta": 1.0
+        }
+      },
+      "creative": {
+        "easy": {
+          "alpha": 1.2523840232200918,
+          "beta": 1.7476159767799082
+        },
+        "medium": {
+          "alpha": 1.4709612115891217,
+          "beta": 1.5290387884108783
+        },
+        "hard": {
+          "alpha": 1.0,
+          "beta": 1.0
+        }
+      },
+      "reasoning": {
+        "easy": {
+          "alpha": 1.0,
+          "beta": 1.0
+        },
+        "medium": {
+          "alpha": 3.0302316511337453,
+          "beta": 1.9697683488662547
+        },
+        "hard": {
+          "alpha": 1.0,
+          "beta": 1.0
+        }
+      },
+      "knowledge": {
+        "easy": {
+          "alpha": 1.0,
+          "beta": 1.0
+        },
+        "medium": {
+          "alpha": 1.4233024638773704,
+          "beta": 1.5766975361226296
+        },
+        "hard": {
+          "alpha": 1.8146694558449301,
+          "beta": 1.1853305441550699
+        }
+      },
+      "general": {
+        "easy": {
+          "alpha": 3.294834596621628,
+          "beta": 1.7051654033783716
+        },
+        "medium": {
+          "alpha": 14.024266687680147,
+          "beta": 4.975733312319854
+        },
+        "hard": {
+          "alpha": 1.0,
+          "beta": 1.0
+        }
+      }
+    },
+    "stats": {
+      "wins": 17
+    }
+  },
+  "moonshotai/kimi-k2-instruct-0905": {
+    "bankroll": 9.89691186077754,
+    "skills": {
+      "coding": {
+        "easy": {
+          "alpha": 1.0,
+          "beta": 1.0
+        },
+        "medium": {
+          "alpha": 1.0,
+          "beta": 1.0
+        },
+        "hard": {
+          "alpha": 1.0,
+          "beta": 1.0
+        }
+      },
+      "math": {
+        "easy": {
+          "alpha": 7.874137373807247,
+          "beta": 3.1258626261927525
+        },
+        "medium": {
+          "alpha": 1.0,
+          "beta": 1.0
+        },
+        "hard": {
+          "alpha": 1.0,
+          "beta": 1.0
+        }
+      },
+      "creative": {
+        "easy": {
+          "alpha": 1.0,
+          "beta": 1.0
+        },
+        "medium": {
+          "alpha": 1.0,
+          "beta": 1.0
+        },
+        "hard": {
+          "alpha": 1.0,
+          "beta": 1.0
+        }
+      },
+      "reasoning": {
+        "easy": {
+          "alpha": 1.0,
+          "beta": 1.0
+        },
+        "medium": {
+          "alpha": 1.0,
+          "beta": 1.0
+        },
+        "hard": {
+          "alpha": 1.0,
+          "beta": 1.0
+        }
+      },
+      "knowledge": {
+        "easy": {
+          "alpha": 1.0,
+          "beta": 1.0
+        },
+        "medium": {
+          "alpha": 2.412609485870237,
+          "beta": 1.5873905141297628
+        },
+        "hard": {
+          "alpha": 1.0,
+          "beta": 1.0
+        }
+      },
+      "general": {
+        "easy": {
+          "alpha": 1.6530802683697527,
+          "beta": 1.3469197316302473
+        },
+        "medium": {
+          "alpha": 8.101525755790513,
+          "beta": 3.898474244209488
+        },
+        "hard": {
+          "alpha": 1.0,
+          "beta": 1.0
+        }
+      }
+    },
+    "stats": {
+      "wins": 9
+    }
+  },
+  "gpt-5-nano-2025-08-07": {
+    "bankroll": 9.441301853612535,
+    "skills": {
+      "coding": {
+        "easy": {
+          "alpha": 1.0,
+          "beta": 1.0
+        },
+        "medium": {
+          "alpha": 1.0,
+          "beta": 1.0
+        },
+        "hard": {
+          "alpha": 1.0,
+          "beta": 1.0
+        }
+      },
+      "math": {
+        "easy": {
+          "alpha": 4.204728653473548,
+          "beta": 2.795271346526452
+        },
+        "medium": {
+          "alpha": 1.0,
+          "beta": 1.0
+        },
+        "hard": {
+          "alpha": 1.0,
+          "beta": 1.0
+        }
+      },
+      "creative": {
+        "easy": {
+          "alpha": 1.0,
+          "beta": 1.0
+        },
+        "medium": {
+          "alpha": 1.0,
+          "beta": 1.0
+        },
+        "hard": {
+          "alpha": 1.0,
+          "beta": 1.0
+        }
+      },
+      "reasoning": {
+        "easy": {
+          "alpha": 1.0,
+          "beta": 1.0
+        },
+        "medium": {
+          "alpha": 1.5767801731021933,
+          "beta": 1.4232198268978067
+        },
+        "hard": {
+          "alpha": 1.0,
+          "beta": 1.0
+        }
+      },
+      "knowledge": {
+        "easy": {
+          "alpha": 2.747989735626568,
+          "beta": 2.252010264373432
+        },
+        "medium": {
+          "alpha": 1.0,
+          "beta": 1.0
+        },
+        "hard": {
+          "alpha": 1.0,
+          "beta": 1.0
+        }
+      },
+      "general": {
+        "easy": {
+          "alpha": 1.0,
+          "beta": 1.0
+        },
+        "medium": {
+          "alpha": 7.521093375913121,
+          "beta": 4.478906624086879
+        },
+        "hard": {
+          "alpha": 1.0,
+          "beta": 1.0
+        }
+      }
+    },
+    "stats": {
+      "wins": 0
+    }
+  }
+}
