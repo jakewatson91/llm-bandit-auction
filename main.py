@@ -1,6 +1,7 @@
 import sys
 import os
 import json
+import math
 import time
 import argparse
 import re
@@ -10,52 +11,41 @@ from dotenv import load_dotenv
 
 from data_loader import get_benchmark_prompts
 from model_config import MODEL_CATALOG
-from prompts import JUDGE_PROMPT
+from prompts import CLASSIFIER_PROMPT, JUDGE_PROMPT
 from models import call_model_with_retry
 from utils import print_leaderboard
 
 load_dotenv()
 
 # --- CONSTANTS ---
-REWARD_PER_QUERY = 0.15
 TIME_PENALTY_PER_SEC = 0.002 
 QUALITY_THRESHOLD = 0.7
-WEIGHTS_FILE = "market_weights_dec_8.json"
+WEIGHTS_FILE = "market_weights_dec9_new_rewards.json"
 CURRENT_JUDGE_INDEX = 0
 CLASSIFIER_INDEX = 0
 MAX_CONSECUTIVE_FAILURES = 3
 EMA_ALPHA = 0.2
 PRINT_SAVE_INTERVAL = 20
 
-# BINARY WORLD: Easy vs Hard
-DIFFICULTY_MULTIPLIERS = { "easy": 1.0, "hard": 2.0 }
-OUTPUT_ESTIMATES = { "easy": 50, "hard": 500 } 
+CATEGORIES = {
+    "easy": { "output_est": 50, "reward": 0.02 },
+    "hard": { "output_est": 500, "reward": 0.15 }
+}
 
 # ---------------- HELPER FUNCTIONS ----------------
 
 def classify_prompt(prompt):
-    """
-    Binary Router: Determines if prompt is 'easy' or 'hard'.
-    """
     global CLASSIFIER_INDEX
-
     classifiers = [k for k, v in MODEL_CATALOG.items() if v.get("is_classifier")]
     if not classifiers: return "hard", 0.0, 0.0
-
-    system_msg = (
-        "Classify the text as 'easy' (simple questions, creative writing, summarization) "
-        "or 'hard' (math, coding, reasoning, analysis).\n"
-        "Return strict JSON: {\"complexity\": \"easy\"} or {\"complexity\": \"hard\"}"
-    )
     
-    full_prompt = f"{system_msg}\n\nText: {prompt[:1000]}"
+    full_prompt = f"{CLASSIFIER_PROMPT}\n\nText: {prompt[:1000]}"
     
     for i in range(len(classifiers)):
-        CLASSIFIER_INDEX = (CLASSIFIER_INDEX + i) % len(classifiers)
-        mid = classifiers[CLASSIFIER_INDEX]
+        idx = (CLASSIFIER_INDEX + i) % len(classifiers)
+        mid = classifiers[idx]
         config = MODEL_CATALOG[mid]
     
-        # Removed temperature argument
         res, latency = call_model_with_retry(config['provider'], mid, full_prompt)
         if res:
             try:        
@@ -64,14 +54,12 @@ def classify_prompt(prompt):
                     data = json.loads(match.group())
                     comp = data.get("complexity", "hard")
                     if comp not in ["easy", "hard"]: comp = "hard"
-
                     cost = (len(full_prompt)/4 * config.get('cost_in', 0)) + \
                            (len(res)/4 * config.get('cost_out', 0))
-                    
                     return comp, cost, latency
             except Exception: pass
-        print(f"\nClassifier {mid} failed. Rotating...")
-        
+        next_classifier = classifiers[(idx + 1) % len(classifiers)]
+        print(f"\nClassifier {mid} failed. Rotating to {next_classifier}...")
     return "hard", 0.0, 0.0
 
 def judge_answer(prompt, answer):
@@ -79,27 +67,25 @@ def judge_answer(prompt, answer):
     judges = [k for k, v in MODEL_CATALOG.items() if v.get("is_judge")]
     if not judges: return None, 0.0
 
-    for i in range(len(judges)):
-        idx = (CURRENT_JUDGE_INDEX + i) % len(judges)
-        mid = judges[idx]
+    for _ in range(len(judges)):
+        mid = judges[CURRENT_JUDGE_INDEX]
         config = MODEL_CATALOG[mid]
         
         msg = f"User Input{prompt}\n\nAgent Answer: {answer}\n\nInstructions: {JUDGE_PROMPT}"
         cost = (len(msg)/4 * config.get('cost_in', 0)) + (100 * config.get('cost_out', 0))
 
-        # Removed temperature argument
         res, _ = call_model_with_retry(config['provider'], mid, msg, is_judge=True)
-
         if res:
             try:
                 match = re.search(r"\{.*\}", res, re.DOTALL)
                 if match:
-                    score = float(json.loads(match.group()).get("score", 0))
-                    CURRENT_JUDGE_INDEX = idx
-                    return score, cost
+                    return float(json.loads(match.group()).get("score", 0)), cost
             except Exception: pass
-        print(f"  ⚠️ Judge {mid} failed. Rotating...")
 
+        last_judge = judges[CURRENT_JUDGE_INDEX]
+        CURRENT_JUDGE_INDEX = (CURRENT_JUDGE_INDEX + 1) % len(judges)
+        print(f"  ⚠️ Judge {last_judge} failed. Rotating to {judges[CURRENT_JUDGE_INDEX]}...")
+    
     return None, 0.0
 
 # ---------------- EV ROUTER AGENT ----------------
@@ -112,10 +98,9 @@ class ModelEV:
         self.ema_latency = self.specs.get("base_latency", 2.0)
         
         self.skills = {
-            "easy": {"alpha": 1.0, "beta": 1.0},
-            "hard": {"alpha": 1.0, "beta": 1.0}
+            "easy": {"alpha": 1.0, "beta": 1.0, "n": 0},
+            "hard": {"alpha": 1.0, "beta": 1.0, "n": 0}
         }
-        
         self.ema_cost_usd = {}
 
     def export_weights(self):
@@ -128,41 +113,41 @@ class ModelEV:
 
     def calculate_ev(self, complexity, input_len):
         stats = self.skills.get(complexity, self.skills["hard"])
-        predicted_quality = np.random.beta(stats["alpha"], stats["beta"])
+        category_data = CATEGORIES.get(complexity, CATEGORIES["hard"])
+
+        base_quality = np.random.beta(stats["alpha"], stats["beta"])
         
-        multiplier = DIFFICULTY_MULTIPLIERS.get(complexity, 1.0)
-        expected_revenue = predicted_quality * REWARD_PER_QUERY * multiplier
+        predicted_quality = base_quality
+        
+        expected_revenue = predicted_quality * category_data["reward"]
 
-        # 3. Cost Estimate (EMA vs Estimate)
         if complexity in self.ema_cost_usd:
-            estimated_compute_cost = self.ema_cost_usd[complexity]
+            est_cost = self.ema_cost_usd[complexity]
         else:
-            est_output_tokens = max(OUTPUT_ESTIMATES.get(complexity, 200), input_len // 2) 
-            estimated_compute_cost = (input_len/4 * self.specs["cost_in"]) + \
-                                     (est_output_tokens * self.specs["cost_out"])
+            est_output = max(category_data["output_est"], input_len // 2) 
+            est_cost = (input_len/4 * self.specs["cost_in"]) + (est_output * self.specs["cost_out"])
 
-        # 4. Time Penalty
-        time_penalty_factor = TIME_PENALTY_PER_SEC / multiplier
-        estimated_time_cost = self.ema_latency * time_penalty_factor
-
-        ev = expected_revenue - (estimated_compute_cost + estimated_time_cost)
-        return ev, predicted_quality, estimated_compute_cost
+        est_time_cost = self.ema_latency * TIME_PENALTY_PER_SEC
+        ev = expected_revenue - (est_cost + est_time_cost)
+        
+        return ev, predicted_quality, est_cost
 
     def update(self, score, latency, realized_cost, complexity):
         if latency > 0:
             self.ema_latency = (EMA_ALPHA * latency) + ((1 - EMA_ALPHA) * self.ema_latency)
         
-        if complexity not in self.skills: complexity = "hard"
+        if complexity not in self.skills: complexity = "easy"
         
-        # Update Cost (EMA)
         if complexity in self.ema_cost_usd:
-            old_cost = self.ema_cost_usd[complexity]
-            self.ema_cost_usd[complexity] = (EMA_ALPHA * realized_cost) + ((1 - EMA_ALPHA) * old_cost)
+            self.ema_cost_usd[complexity] = (EMA_ALPHA * realized_cost) + ((1 - EMA_ALPHA) * self.ema_cost_usd[complexity])
         else:
             self.ema_cost_usd[complexity] = realized_cost
             
-        # Quality Update
         stats = self.skills[complexity]
+        
+        if "n" not in stats: stats["n"] = 0
+        stats["n"] += 1
+        
         stats["alpha"] += score
         stats["beta"] += (1.0 - score)
 
@@ -208,13 +193,9 @@ def run_simulation(models, prompts, train=True, evaluate=False, verbose=False):
             print(f"PROMPT [{i+1}]: {prompt_text[:80]}..." if not verbose else f"PROMPT [{i+1}]: {prompt_text}")
             print(f"{'-'*60}")
         
-        # --- 1. CLASSIFY ---
         complexity, classifier_cost, classifier_latency = classify_prompt(prompt_text)
-        
-        if not evaluate:
-             print(f"Routing: {complexity.upper()}")
+        if not evaluate: print(f"Routing: {complexity.upper()}")
 
-        # --- 2. SELECT MODEL ---
         candidates = []
         for m in models:
             ev, pred_quality, est_cost = m.calculate_ev(complexity, len(prompt_text))
@@ -228,24 +209,17 @@ def run_simulation(models, prompts, train=True, evaluate=False, verbose=False):
                 print(f"  • {m.id:<35} | Qual: {qual:.2f} | Est.Cost: ${cost:.5f} | EV: {ev:.5f}")
             print(f"{'-'*60}")
 
-        # --- 3. EXECUTION ---
         selected_model = None
         model_response = None
         
         for ev, m, _, _ in candidates:
-            # Removed temperature argument
-            model_response, latency = call_model_with_retry(
-                m.provider, m.id, prompt_text
-            )
-
+            model_response, latency = call_model_with_retry(m.provider, m.id, prompt_text)
             if model_response is None:
                 print(f"  ⚠️ {m.id} failed. Penalizing...")
                 m.update(0.0, 0.0, 0.0, complexity) 
                 continue 
-
             selected_model = m
-            if not evaluate:
-                print(f"🚀 SELECTED: {selected_model.id} (Latency: {latency:.3f}s)")
+            if not evaluate: print(f"🚀 SELECTED: {selected_model.id} (Latency: {latency:.3f}s)")
             break 
 
         if selected_model is None:
@@ -254,23 +228,21 @@ def run_simulation(models, prompts, train=True, evaluate=False, verbose=False):
             if consecutive_failures >= MAX_CONSECUTIVE_FAILURES: save_and_exit(models, "All APIs failed")
             continue 
 
-        # --- 4. JUDGE ---
         quality_score, total_judge_cost = judge_answer(prompt_text, model_response)
         
         if quality_score is None:
             consecutive_failures += 1
-            print(f"  ⚠️ FAIL: Judge crashed. ({consecutive_failures}/{MAX_CONSECUTIVE_FAILURES})")
+            print(f"  ⚠️ FAIL: Judge crashed.")
             if consecutive_failures >= MAX_CONSECUTIVE_FAILURES: save_and_exit(models, "Judges broken")
             continue 
         
-        # --- 5. STATS & UPDATE ---
         token_cost = (len(prompt_text)/4 * selected_model.specs["cost_in"]) + \
                      (len(model_response)/4 * selected_model.specs["cost_out"])
         realized_compute_cost = token_cost + classifier_cost + total_judge_cost
         
         is_failure = quality_score < QUALITY_THRESHOLD
-        multiplier = DIFFICULTY_MULTIPLIERS.get(complexity, 1.0)
-        revenue = (quality_score * REWARD_PER_QUERY * multiplier) if not is_failure else 0.0
+        reward = CATEGORIES.get(complexity, CATEGORIES["hard"])["reward"]
+        revenue = (quality_score * reward) if not is_failure else 0.0
         net_profit = revenue - (realized_compute_cost + (latency * TIME_PENALTY_PER_SEC))
 
         if not evaluate:

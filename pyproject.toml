@@ -1,7 +1,18 @@
 [project]
-name = "project"
+# You can change the name and version, but they are required
+name = "prompt-market"
 version = "0.1.0"
-description = "Add your description here"
-readme = "README.md"
-requires-python = ">=3.10"
-dependencies = []
+description = "Python project managed by uv"
+
+# The core list of all necessary external packages
+dependencies = [
+    "datasets",
+    "python-dotenv",
+    "numpy",
+    "pandas",
+    "scipy",
+    "matplotlib",
+    "openai",
+    "groq",
+    "google-genai",
+]

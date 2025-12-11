@@ -10,9 +10,9 @@ from model_config import MODEL_CATALOG
 from main import initialize_market, run_simulation, judge_answer, print_leaderboard
 
 # --- CONFIGURATION ---
-TEST_SIZE = 50
+TEST_SIZE = 100
 TEST_DATA_OFFSET = 500
-BENCHMARK_FILENAME = "benchmark_results_dec_5.csv"
+BENCHMARK_FILENAME = "benchmark_results_dec9_new_rewards.csv"
 PRINT_SAVE_INTERVAL = 20
 
 def run_baselines(prompts):
